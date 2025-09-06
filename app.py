@@ -103,7 +103,8 @@ def getallusers():
 @app.route('/')
 def home():
     names, rolls, times, l = extract_attendance()
-    return render_template('home.html', names=names, rolls=rolls, times=times, l=l, totalreg=totalreg(), datetoday2=datetoday2)
+    userlist, _, _, _ = getallusers()
+    return render_template('home.html', names=names, rolls=rolls, times=times, l=l, totalreg=totalreg(), datetoday2=datetoday2, userlist=userlist)
 
 @app.route('/start', methods=['GET'])
 def start():
@@ -204,6 +205,66 @@ def add():
     train_model()
     names, rolls, times, l = extract_attendance()
     return render_template('home.html', names=names, rolls=rolls, times=times, l=l, totalreg=totalreg(), datetoday2=datetoday2)
+
+@app.route('/search', methods=['POST'])
+def search_user():
+    searchuser = request.form['searchuser']
+    userlist, _, _, _ = getallusers()
+    
+    cap = cv2.VideoCapture(0)
+    found = False
+    os.makedirs('static/found', exist_ok=True)
+
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            break
+
+        faces = extract_faces(frame)
+        for (x, y, w, h) in faces:
+            face = cv2.resize(frame[y:y+h, x:x+w], (50, 50))
+            identified_person = identify_face(face.reshape(1, -1))[0]
+
+            if identified_person == searchuser:
+                found = True
+                # Draw rectangle & name on frame before saving
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 3)
+                cv2.putText(frame, identified_person, (x, y - 10),
+                            cv2.FONT_HERSHEY_COMPLEX, 1, (0, 255, 0), 2)
+
+                # Save the annotated frame
+                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                save_path = f'static/found/{searchuser}_{timestamp}.jpg'
+                cv2.imwrite(save_path, frame)
+
+                # Log to CSV
+                with open(f'Attendance/SearchLog-{datetoday}.csv', 'a') as f:
+                    f.write(f'\n{searchuser},{datetime.now().strftime("%H:%M:%S")},Found')
+
+                break  # stop checking other faces
+
+        cv2.imshow('Search User', frame)
+
+        # Stop if found or user presses 'q'
+        if found or cv2.waitKey(1) == ord('q'):
+            break
+
+    cap.release()
+    cv2.destroyAllWindows()
+
+    names, rolls, times, l = extract_attendance()
+    return render_template(
+        'home.html',
+        names=names,
+        rolls=rolls,
+        times=times,
+        l=l,
+        totalreg=totalreg(),
+        datetoday2=datetoday2,
+        userlist=userlist,
+        mess=f"{'User Found and Saved!' if found else 'User Not Found!'}"
+    )
+
 
 if __name__ == '__main__':
     app.run(debug=True)

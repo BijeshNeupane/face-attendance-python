@@ -118,6 +118,25 @@
             </form>
         </div>
 
+        <div class="col"
+    style="border-radius: 20px;padding: 0px;background-color:rgb(0, 0, 0, 0.8);margin:0px 10px 10px 10px;height: 400px;">
+    <form action='/search' method="POST">
+        <h2 style="border-radius: 20px 20px 0px 0px;background-color: rgb(0, 153, 255);color: white;padding: 10px;">
+            Search for User <i class="material-icons">search</i>
+        </h2>
+        <label style="font-size: 20px; color: white"><b>Select User*</b></label><br>
+        <select name="searchuser" style="font-size: 20px;margin-top:10px;margin-bottom:10px;border-radius: 10px;width: 300px; height: 50px;" required>
+            {% for user in userlist %}
+                <option value="{{ user }}">{{ user }}</option>
+            {% endfor %}
+        </select><br>
+        <button style="width: 300px;margin-top: 20px;font-size: 20px; border-radius: 10px; height: 50px;" type='submit' class='btn btn-info'>
+            Search User
+        </button>
+    </form>
+</div>
+
+
     </div>
 
 </body>
