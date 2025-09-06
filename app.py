@@ -8,6 +8,8 @@ from sklearn.neighbors import KNeighborsClassifier
 import pandas as pd
 import joblib
 
+cameraName = "Bijesh's PC"  # Change to your camera name
+
 app = Flask(__name__)
 
 nimgs = 10
@@ -47,7 +49,7 @@ def identify_face(facearray):
     distances, indices = model.kneighbors(facearray, n_neighbors=1)
 
     # Threshold: if the distance is too large, mark as "Unknown"
-    if distances[0][0] > 3000:  # You can tune this threshold
+    if distances[0][0] > 3500:  # You can tune this threshold
         return ["Unknown"]
     return model.predict(facearray)
 
@@ -239,7 +241,7 @@ def search_user():
 
                 # Log to CSV
                 with open(f'Attendance/SearchLog-{datetoday}.csv', 'a') as f:
-                    f.write(f'\n{searchuser},{datetime.now().strftime("%H:%M:%S")},Found')
+                    f.write(f'\n{searchuser},{datetime.now().strftime("%H:%M:%S")},Found,{cameraName}')
 
                 break  # stop checking other faces
 
