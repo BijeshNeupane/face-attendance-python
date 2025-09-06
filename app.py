@@ -47,7 +47,7 @@ def identify_face(facearray):
     distances, indices = model.kneighbors(facearray, n_neighbors=1)
 
     # Threshold: if the distance is too large, mark as "Unknown"
-    if distances[0][0] > 4000:  # You can tune this threshold
+    if distances[0][0] > 3000:  # You can tune this threshold
         return ["Unknown"]
     return model.predict(facearray)
 
