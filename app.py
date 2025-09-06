@@ -44,7 +44,13 @@ def extract_faces(img):
 
 def identify_face(facearray):
     model = joblib.load('static/face_recognition_model.pkl')
+    distances, indices = model.kneighbors(facearray, n_neighbors=1)
+
+    # Threshold: if the distance is too large, mark as "Unknown"
+    if distances[0][0] > 4000:  # You can tune this threshold
+        return ["Unknown"]
     return model.predict(facearray)
+
 
 
 def train_model():
@@ -103,33 +109,66 @@ def home():
 def start():
     names, rolls, times, l = extract_attendance()
 
+    # If model is missing, show message
     if 'face_recognition_model.pkl' not in os.listdir('static'):
-        return render_template('home.html', names=names, rolls=rolls, times=times, l=l, totalreg=totalreg(), datetoday2=datetoday2, mess='There is no trained model in the static folder. Please add a new face to continue.')
+        return render_template(
+            'home.html',
+            names=names,
+            rolls=rolls,
+            times=times,
+            l=l,
+            totalreg=totalreg(),
+            datetoday2=datetoday2,
+            mess='There is no trained model in the static folder. Please add a new face to continue.'
+        )
 
-    ret = True
     cap = cv2.VideoCapture(0)
-    while ret:
+    while True:
         ret, frame = cap.read()
-        if len(extract_faces(frame)) > 0:
-            (x, y, w, h) = extract_faces(frame)[0]
-            cv2.rectangle(frame, (x, y), (x+w, y+h), (86, 32, 251), 1)
-            cv2.rectangle(frame, (x, y), (x+w, y-40), (86, 32, 251), -1)
-            face = cv2.resize(frame[y:y+h, x:x+w], (50, 50))
+        if not ret:
+            break
+
+        faces = extract_faces(frame)
+        for (x, y, w, h) in faces:
+            # Draw face rectangle
+            cv2.rectangle(frame, (x, y), (x + w, y + h), (86, 32, 251), 1)
+            cv2.rectangle(frame, (x, y - 40), (x + w, y), (86, 32, 251), -1)
+
+            # Prepare face for prediction
+            face = cv2.resize(frame[y:y + h, x:x + w], (50, 50))
             identified_person = identify_face(face.reshape(1, -1))[0]
-            add_attendance(identified_person)
-            cv2.rectangle(frame, (x,y), (x+w, y+h), (0,0,255), 1)
-            cv2.rectangle(frame,(x,y),(x+w,y+h),(50,50,255),2)
-            cv2.rectangle(frame,(x,y-40),(x+w,y),(50,50,255),-1)
-            cv2.putText(frame, f'{identified_person}', (x,y-15), cv2.FONT_HERSHEY_COMPLEX, 1, (255,255,255), 1)
-            cv2.rectangle(frame, (x,y), (x+w, y+h), (50,50,255), 1)
+
+            if identified_person != "Unknown":
+                add_attendance(identified_person)
+                cv2.putText(frame, f'{identified_person}', (x, y - 15),
+                            cv2.FONT_HERSHEY_COMPLEX, 1, (255, 255, 255), 1)
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (50, 50, 255), 2)
+            else:
+                cv2.putText(frame, "Unknown", (x, y - 15),
+                            cv2.FONT_HERSHEY_COMPLEX, 1, (255, 255, 255), 1)
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 2)
+
+        # Place frame into background image
         imgBackground[162:162 + 480, 55:55 + 640] = frame
         cv2.imshow('Attendance', imgBackground)
+
         if cv2.waitKey(1) == ord('q'):
             break
+
     cap.release()
     cv2.destroyAllWindows()
+
     names, rolls, times, l = extract_attendance()
-    return render_template('home.html', names=names, rolls=rolls, times=times, l=l, totalreg=totalreg(), datetoday2=datetoday2)
+    return render_template(
+        'home.html',
+        names=names,
+        rolls=rolls,
+        times=times,
+        l=l,
+        totalreg=totalreg(),
+        datetoday2=datetoday2
+    )
+
 
 
 
