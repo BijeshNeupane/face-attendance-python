@@ -7,6 +7,7 @@ import numpy as np
 from sklearn.neighbors import KNeighborsClassifier
 import pandas as pd
 import joblib
+import face_recognition
 
 cameraName = "Bijesh's PC"  # Change to your camera name
 
@@ -44,15 +45,26 @@ def extract_faces(img):
     except:
         return []
 
-def identify_face(facearray):
-    model = joblib.load('static/face_recognition_model.pkl')
-    distances, indices = model.kneighbors(facearray, n_neighbors=1)
+def identify_face(facearray, knn, threshold=0.5):
+    # Ensure RGB
+    if len(facearray.shape) == 2 or facearray.shape[2] == 1:
+        facearray = cv2.cvtColor(facearray, cv2.COLOR_GRAY2RGB)
+    else:
+        facearray = cv2.cvtColor(facearray, cv2.COLOR_BGR2RGB)
 
-    # Threshold: if the distance is too large, mark as "Unknown"
-    if distances[0][0] > 2800:  # You can tune this threshold
-        return ["Unknown"]
-    return model.predict(facearray)
+    face_locations = face_recognition.face_locations(facearray)
+    if not face_locations:
+        return None
 
+    face_encodings = face_recognition.face_encodings(facearray, known_face_locations=face_locations)
+    if not face_encodings:
+        return None
+
+    distances, indices = knn.kneighbors([face_encodings[0]], n_neighbors=1)
+    if distances[0][0] > threshold:
+        return None  # Unknown person
+    predicted_name = knn.predict([face_encodings[0]])[0]
+    return predicted_name
 
 
 def train_model():
@@ -61,10 +73,14 @@ def train_model():
     userlist = os.listdir('static/faces')
     for user in userlist:
         for imgname in os.listdir(f'static/faces/{user}'):
-            img = cv2.imread(f'static/faces/{user}/{imgname}')
-            resized_face = cv2.resize(img, (50, 50))
-            faces.append(resized_face.ravel())
-            labels.append(user)
+            img_path = f'static/faces/{user}/{imgname}'
+            img = face_recognition.load_image_file(img_path)
+            
+            encodings = face_recognition.face_encodings(img)
+            if len(encodings) > 0:  # Only if a face is found
+                faces.append(encodings[0])  # 128D vector
+                labels.append(user)
+
     faces = np.array(faces)
     knn = KNeighborsClassifier(n_neighbors=5)
     knn.fit(faces, labels)
@@ -112,65 +128,57 @@ def home():
 def start():
     names, rolls, times, l = extract_attendance()
 
-    # If model is missing, show message
-    if 'face_recognition_model.pkl' not in os.listdir('static'):
-        return render_template(
-            'home.html',
-            names=names,
-            rolls=rolls,
-            times=times,
-            l=l,
-            totalreg=totalreg(),
-            datetoday2=datetoday2,
-            mess='There is no trained model in the static folder. Please add a new face to continue.'
-        )
+    # Check model
+    model_path = 'static/face_recognition_model.pkl'
+    if not os.path.exists(model_path):
+        return render_template('home.html', names=names, rolls=rolls, times=times, l=l,
+                               totalreg=totalreg(), datetoday2=datetoday2,
+                               mess='No trained model found. Please add a new face first.')
 
+    knn = joblib.load(model_path)
     cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        return render_template('home.html', mess="⚠ Could not access webcam!")
+
+    frame_count = 0
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        faces = extract_faces(frame)
+        frame_count += 1
+        if frame_count % 2 != 0:  # skip every other frame
+            continue
+
+        small_frame = cv2.resize(frame, (0,0), fx=0.5, fy=0.5)
+        faces = extract_faces(small_frame)
+
         for (x, y, w, h) in faces:
-            # Draw face rectangle
-            cv2.rectangle(frame, (x, y), (x + w, y + h), (86, 32, 251), 1)
-            cv2.rectangle(frame, (x, y - 40), (x + w, y), (86, 32, 251), -1)
+            # scale back to original
+            x, y, w, h = x*2, y*2, w*2, h*2
+            face_img = frame[y:y+h, x:x+w]
+            identified_person = identify_face(face_img, knn)
 
-            # Prepare face for prediction
-            face = cv2.resize(frame[y:y + h, x:x + w], (50, 50))
-            identified_person = identify_face(face.reshape(1, -1))[0]
-
-            if identified_person != "Unknown":
+            if identified_person:
                 add_attendance(identified_person)
-                cv2.putText(frame, f'{identified_person}', (x, y - 15),
-                            cv2.FONT_HERSHEY_COMPLEX, 1, (255, 255, 255), 1)
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (50, 50, 255), 2)
+                color = (50, 50, 255)
+                text = identified_person
             else:
-                cv2.putText(frame, "Unknown", (x, y - 15),
-                            cv2.FONT_HERSHEY_COMPLEX, 1, (255, 255, 255), 1)
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 0, 255), 2)
+                color = (0, 0, 255)
+                text = "Unknown"
 
-        # Place frame into background image
-        imgBackground[162:162 + 480, 55:55 + 640] = frame
-        cv2.imshow('Attendance', imgBackground)
+            cv2.rectangle(frame, (x, y), (x+w, y+h), color, 2)
+            cv2.putText(frame, text, (x, y-10), cv2.FONT_HERSHEY_COMPLEX, 0.8, (255,255,255), 2)
 
+        cv2.imshow('Attendance', frame)
         if cv2.waitKey(1) == ord('q'):
             break
 
     cap.release()
     cv2.destroyAllWindows()
-
     names, rolls, times, l = extract_attendance()
-    return render_template(
-        'home.html',
-        names=names,
-        rolls=rolls,
-        times=times,
-        l=l,
-        totalreg=totalreg(),
-        datetoday2=datetoday2
-    )
+    return render_template('home.html', names=names, rolls=rolls, times=times, l=l,
+                           totalreg=totalreg(), datetoday2=datetoday2)
 
 
 
@@ -212,60 +220,62 @@ def add():
 def search_user():
     searchuser = request.form['searchuser']
     userlist, _, _, _ = getallusers()
-    
+
+    model_path = 'static/face_recognition_model.pkl'
+    if not os.path.exists(model_path):
+        return render_template('home.html', mess="No trained model found.")
+
+    knn = joblib.load(model_path)
     cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        return render_template('home.html', mess="⚠ Could not access webcam!")
+
     found = False
     os.makedirs('static/found', exist_ok=True)
 
+    frame_count = 0
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        faces = extract_faces(frame)
+        frame_count += 1
+        if frame_count % 2 != 0:
+            continue
+
+        small_frame = cv2.resize(frame, (0,0), fx=0.5, fy=0.5)
+        faces = extract_faces(small_frame)
+
         for (x, y, w, h) in faces:
-            face = cv2.resize(frame[y:y+h, x:x+w], (50, 50))
-            identified_person = identify_face(face.reshape(1, -1))[0]
+            x, y, w, h = x*2, y*2, w*2, h*2
+            face_img = frame[y:y+h, x:x+w]
+            identified_person = identify_face(face_img, knn)
 
             if identified_person == searchuser:
                 found = True
-                # Draw rectangle & name on frame before saving
-                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 3)
-                cv2.putText(frame, identified_person, (x, y - 10),
-                            cv2.FONT_HERSHEY_COMPLEX, 1, (0, 255, 0), 2)
+                cv2.rectangle(frame, (x, y), (x+w, y+h), (0,255,0), 3)
+                cv2.putText(frame, identified_person, (x, y-10),
+                            cv2.FONT_HERSHEY_COMPLEX, 0.8, (0,255,0), 2)
 
-                # Save the annotated frame
                 timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
                 save_path = f'static/found/{searchuser}_{timestamp}.jpg'
                 cv2.imwrite(save_path, frame)
 
-                # Log to CSV
                 with open(f'Attendance/SearchLog-{datetoday}.csv', 'a') as f:
                     f.write(f'\n{searchuser},{datetime.now().strftime("%H:%M:%S")},Found,{cameraName}')
-
-                break  # stop checking other faces
+                break
 
         cv2.imshow('Search User', frame)
-
-        # Stop if found or user presses 'q'
         if found or cv2.waitKey(1) == ord('q'):
             break
 
     cap.release()
     cv2.destroyAllWindows()
-
     names, rolls, times, l = extract_attendance()
-    return render_template(
-        'home.html',
-        names=names,
-        rolls=rolls,
-        times=times,
-        l=l,
-        totalreg=totalreg(),
-        datetoday2=datetoday2,
-        userlist=userlist,
-        mess=f"{'User Found and Saved!' if found else 'User Not Found!'}"
-    )
+    return render_template('home.html', names=names, rolls=rolls, times=times, l=l,
+                           totalreg=totalreg(), datetoday2=datetoday2,
+                           userlist=userlist,
+                           mess=f"{'User Found and Saved!' if found else 'User Not Found!'}")
 
 
 if __name__ == '__main__':
