@@ -45,7 +45,7 @@ def extract_faces(img):
     except:
         return []
 
-def identify_face(facearray, knn, threshold=0.5):
+def identify_face(facearray, knn, threshold=0.4):
     # Ensure RGB
     if len(facearray.shape) == 2 or facearray.shape[2] == 1:
         facearray = cv2.cvtColor(facearray, cv2.COLOR_GRAY2RGB)
