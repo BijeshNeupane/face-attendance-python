@@ -1,11 +1,9 @@
 import cv2
 import os
+import json
 from flask import Flask, request, render_template, redirect, url_for, session, send_file
 from datetime import date, datetime
 import numpy as np
-from sklearn.neighbors import KNeighborsClassifier
-import pandas as pd
-import joblib
 import face_recognition
 import sqlite3
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -14,19 +12,15 @@ from functools import wraps
 # multiprocessing imports
 import multiprocessing
 from multiprocessing import Process, Queue, Manager
+import time
 
-
-
-
-
-
+# ------------------------- CONFIG & GLOBALS -------------------------
 app = Flask(__name__)
 app.secret_key = 'replace_this_with_a_strong_secret'  # <-- change this
 
-# ------------------------- CONFIG & GLOBALS -------------------------
 CAMERAS = {
     0: "Bijesh's PC Camera",
-    "http://10.5.11.92:4747/video/mjpegfeed?640x480": "Phone Camera"  # Change IP to your phone's IP
+    "http://192.168.1.97:4747/video/mjpegfeed?640x480": "Phone Camera"  # Change IP to your phone's IP
 }
 
 nimgs = 10
@@ -35,15 +29,26 @@ datetoday2 = date.today().strftime("%d-%B-%Y")
 
 face_detector = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
 
-for directory in ['Attendance', 'static', 'static/faces', 'static/found']:
+for directory in ['Attendance', 'static', 'static/faces', 'static/found', 'uploads']:
     os.makedirs(directory, exist_ok=True)
 
-model_path = 'static/face_recognition_model.pkl'
-USER_DB = 'users.db'
+# removed model_path / joblib / sklearn usage
+USER_DB = 'users.db'         # original users DB
+ENC_DB = 'encodings.db'      # new DB for registered faces and attendance (we'll store users here too)
 USER_BASEPATH = 'static/faces'
 
-# ------------------------- SQLITE USER DB -------------------------
+# ------------------------- SETTINGS FOR CUSTOM KNN -------------------------
+K_NEIGHBORS = 3
+METRIC = "euclidean"  # "euclidean" or "cosine"
+THRESHOLD_EUCLIDEAN = 0.5
+THRESHOLD_COSINE = 0.5  # interpreted as minimum cosine similarity
+
+# ------------------------- DATABASE SETUP -------------------------
 def init_db():
+    # create users db (kept) and encoding db (new combined)
+    # We'll keep the original USER_DB for auth compatibility, but we can also create tables in the same DB
+    # To avoid confusion, we'll create/ensure both USER_DB and ENC_DB exist and necessary tables are in ENC_DB.
+    # Keep original users table in USER_DB as your app currently expects.
     con = sqlite3.connect(USER_DB)
     cur = con.cursor()
     cur.execute('''CREATE TABLE IF NOT EXISTS users (
@@ -54,6 +59,40 @@ def init_db():
                 )''')
     con.commit()
     con.close()
+
+    con2 = sqlite3.connect(ENC_DB)
+    cur2 = con2.cursor()
+    # registered faces: owner_username ties to the logged-in user that registered these faces
+    cur2.execute('''CREATE TABLE IF NOT EXISTS registered_faces (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        owner_username TEXT,
+                        person_label TEXT,   -- e.g., "John_123" (name_id)
+                        person_name TEXT,    -- "John"
+                        person_id TEXT,      -- "123"
+                        encoding TEXT,       -- JSON string of 128d list
+                        created_at TEXT
+                    )''')
+    # attendance logs per owner (i.e., logged-in user)
+    cur2.execute('''CREATE TABLE IF NOT EXISTS attendance_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        owner_username TEXT,
+                        person_label TEXT,
+                        person_name TEXT,
+                        person_id TEXT,
+                        time TEXT,
+                        camera TEXT
+                    )''')
+    # search logs (per owner)
+    cur2.execute('''CREATE TABLE IF NOT EXISTS search_logs (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        owner_username TEXT,
+                        search_target TEXT,
+                        time TEXT,
+                        status TEXT,
+                        camera TEXT
+                    )''')
+    con2.commit()
+    con2.close()
 
 init_db()
 
@@ -106,102 +145,6 @@ def extract_faces(img):
     except Exception:
         return []
 
-def identify_face(facearray, knn, threshold=0.5):
-    try:
-        if len(facearray.shape) == 2:
-            facearray = cv2.cvtColor(facearray, cv2.COLOR_GRAY2RGB)
-        elif facearray.shape[2] == 4:
-            facearray = cv2.cvtColor(facearray, cv2.COLOR_BGRA2RGB)
-        else:
-            facearray = cv2.cvtColor(facearray, cv2.COLOR_BGR2RGB)
-
-        small_face = cv2.resize(facearray, (0, 0), fx=0.5, fy=0.5)
-        face_locations = face_recognition.face_locations(small_face, model='hog')
-        if not face_locations:
-            return None
-
-        face_encodings = face_recognition.face_encodings(small_face, known_face_locations=face_locations)
-        if not face_encodings:
-            return None
-
-        distances, indices = knn.kneighbors([face_encodings[0]], n_neighbors=1)
-        if distances[0][0] > threshold:
-            return None
-
-        return knn.predict([face_encodings[0]])[0]
-    except Exception:
-        return None
-
-def train_model():
-    faces = []
-    labels = []
-    userlist = os.listdir(USER_BASEPATH) if os.path.exists(USER_BASEPATH) else []
-
-    print('Training model...')
-    for user in userlist:
-        user_path = f'{USER_BASEPATH}/{user}'
-        if not os.path.isdir(user_path):
-            continue
-        for imgname in os.listdir(user_path):
-            img_path = f'{user_path}/{imgname}'
-            try:
-                img = face_recognition.load_image_file(img_path)
-            except Exception:
-                continue
-
-            small_img = cv2.resize(img, (0, 0), fx=0.5, fy=0.5)
-            encodings = face_recognition.face_encodings(small_img, model='hog')
-            if len(encodings) > 0:
-                faces.append(encodings[0])
-                labels.append(user)
-
-    if len(faces) == 0:
-        print("No faces found for training!")
-        return False
-
-    faces = np.array(faces)
-    knn = KNeighborsClassifier(n_neighbors=min(5, len(faces)))
-    knn.fit(faces, labels)
-    joblib.dump(knn, model_path)
-    print(f'Model trained with {len(faces)} face samples!')
-    return True
-
-def extract_attendance(username=None):
-    csv_path = user_today_csv(username)
-    df = pd.read_csv(csv_path)
-    return df['Name'], df['Roll'], df['Time'], df.get('Camera', ['N/A'] * len(df)), len(df)
-
-def add_attendance(name, camera_name, username=None):
-    if username is None:
-        username = session.get('user')
-    username_from_label = name.split('_')[0] if '_' in name else name
-    userid = name.split('_')[1] if '_' in name else name
-    current_time = datetime.now().strftime("%H:%M:%S")
-
-    csv_path = user_today_csv(username)
-    df = pd.read_csv(csv_path)
-    try:
-        if int(userid) not in list(df['Roll'].astype(int)):
-            with open(csv_path, 'a') as f:
-                f.write(f'\n{username_from_label},{userid},{current_time},{camera_name}')
-    except Exception:
-        if userid not in list(df['Roll'].astype(str)):
-            with open(csv_path, 'a') as f:
-                f.write(f'\n{username_from_label},{userid},{current_time},{camera_name}')
-
-def getallusers_original():
-    userlist = os.listdir(USER_BASEPATH) if os.path.exists(USER_BASEPATH) else []
-    names = []
-    rolls = []
-    for i in userlist:
-        if '_' in i:
-            name, roll = i.split('_', 1)
-        else:
-            name, roll = i, ''
-        names.append(name)
-        rolls.append(roll)
-    return userlist, names, rolls, len(userlist)
-
 def open_camera(camera_id):
     cap = cv2.VideoCapture(camera_id)
     if not cap.isOpened():
@@ -215,6 +158,114 @@ def open_camera(camera_id):
     except Exception:
         pass
     return cap
+
+def get_all_registered_for_owner(owner_username):
+    """Return (encodings_np_array, labels_list) for the given owner user.
+       encodings_np_array shape = (N,128), labels_list length N, label as person_label (e.g., 'Name_123')"""
+    con = sqlite3.connect(ENC_DB)
+    cur = con.cursor()
+    cur.execute("SELECT person_label, encoding FROM registered_faces WHERE owner_username = ?", (owner_username,))
+    rows = cur.fetchall()
+    con.close()
+    labels = []
+    encs = []
+    for lbl, enc_json in rows:
+        try:
+            enc = np.array(json.loads(enc_json))
+            if enc.shape[0] == 128:
+                encs.append(enc)
+                labels.append(lbl)
+        except Exception:
+            continue
+    if len(encs) == 0:
+        return np.array([]), []
+    return np.vstack(encs), labels
+
+def save_encoding_to_db(owner_username, person_label, person_name, person_id, encoding):
+    """encoding: numpy array of length 128"""
+    con = sqlite3.connect(ENC_DB)
+    cur = con.cursor()
+    cur.execute(
+        "INSERT INTO registered_faces (owner_username, person_label, person_name, person_id, encoding, created_at) VALUES (?, ?, ?, ?, ?, ?)",
+        (owner_username, person_label, person_name, str(person_id), json.dumps(encoding.tolist()), datetime.now().isoformat())
+    )
+    con.commit()
+    con.close()
+
+def log_attendance_db(owner_username, person_label, person_name, person_id, camera_name):
+    con = sqlite3.connect(ENC_DB)
+    cur = con.cursor()
+    cur.execute(
+        "INSERT INTO attendance_logs (owner_username, person_label, person_name, person_id, time, camera) VALUES (?, ?, ?, ?, ?, ?)",
+        (owner_username, person_label, person_name, str(person_id), datetime.now().strftime("%Y-%m-%d %H:%M:%S"), camera_name)
+    )
+    con.commit()
+    con.close()
+
+def log_search_db(owner_username, search_target, status, camera_name):
+    con = sqlite3.connect(ENC_DB)
+    cur = con.cursor()
+    cur.execute(
+        "INSERT INTO search_logs (owner_username, search_target, time, status, camera) VALUES (?, ?, ?, ?, ?)",
+        (owner_username, search_target, datetime.now().strftime("%Y-%m-%d %H:%M:%S"), status, camera_name)
+    )
+    con.commit()
+    con.close()
+
+# ------------------------- CUSTOM KNN & METRICS -------------------------
+def euclidean_distances(face_encoding, known_encodings):
+    # face_encoding: (128,), known_encodings: (N,128)
+    # returns distances shape (N,)
+    diffs = known_encodings - face_encoding
+    dists = np.linalg.norm(diffs, axis=1)
+    return dists
+
+def cosine_similarities(face_encoding, known_encodings):
+    # returns cosine similarity in [-1,1] shape (N,)
+    # handle zero vectors defensively
+    fe = face_encoding / np.linalg.norm(face_encoding) if np.linalg.norm(face_encoding) != 0 else face_encoding
+    ke_norms = np.linalg.norm(known_encodings, axis=1)
+    # avoid division by zero
+    valid = ke_norms != 0
+    sims = np.zeros(known_encodings.shape[0])
+    if known_encodings.shape[0] == 0:
+        return sims
+    sims[valid] = np.dot(known_encodings[valid], fe) / ke_norms[valid]
+    return sims
+
+def predict_knn_custom(face_encoding, known_encodings, known_labels, k=K_NEIGHBORS, metric=METRIC):
+    """
+    Returns predicted label or None if nothing within threshold.
+    For euclidean: smaller distances better. Use THRESHOLD_EUCLIDEAN.
+    For cosine: larger similarity better. Use THRESHOLD_COSINE.
+    """
+    if known_encodings.size == 0 or len(known_labels) == 0:
+        return None
+
+    if metric == "euclidean":
+        dists = euclidean_distances(face_encoding, known_encodings)
+        idx_sorted = np.argsort(dists)
+        kidx = idx_sorted[:min(k, len(dists))]
+        # threshold check: if best distance > threshold => unknown
+        if dists[kidx[0]] > THRESHOLD_EUCLIDEAN:
+            return None
+        k_labels = [known_labels[i] for i in kidx]
+        # majority vote
+        pred = max(set(k_labels), key=k_labels.count)
+        return pred
+    elif metric == "cosine":
+        sims = cosine_similarities(face_encoding, known_encodings)
+        # higher is better
+        idx_sorted = np.argsort(-sims)
+        kidx = idx_sorted[:min(k, len(sims))]
+        if sims[kidx[0]] < THRESHOLD_COSINE:
+            return None
+        k_labels = [known_labels[i] for i in kidx]
+        pred = max(set(k_labels), key=k_labels.count)
+        return pred
+    else:
+        # fallback to euclidean
+        return predict_knn_custom(face_encoding, known_encodings, known_labels, k, "euclidean")
 
 # --------------------- Multiprocessing-based camera + recognizer ---------------------
 
@@ -254,9 +305,9 @@ def camera_process(camera_id, camera_name, req_queue, res_queue, stop_flag, proc
                 success, encoded = cv2.imencode('.jpg', frame)
                 if success:
                     try:
-                        req_queue.put_bytes(encoded.tobytes())  # using raw bytes method if available
+                        # some multiprocessing Queue implementations have put_bytes
+                        req_queue.put_bytes(encoded.tobytes())
                     except Exception:
-                        # fallback: put bytes into queue normally
                         req_queue.put(encoded.tobytes())
 
             # non-blocking read of results for this camera
@@ -284,26 +335,26 @@ def camera_process(camera_id, camera_name, req_queue, res_queue, stop_flag, proc
     except Exception as e:
         print(f"[camera_process] Error ({camera_name}): {e}")
     finally:
-        cap.release()
+        try:
+            cap.release()
+        except Exception:
+            pass
         cv2.destroyWindow(f'Camera - {camera_name}')
         print(f"[camera_process] {camera_name} closed")
 
 def recognizer_process(all_req_queues, all_res_queues, shared_stop, username_for_attendance, mode_shared):
     """
-    Runs in single process. Loads KNN model and performs face detection/recognition.
+    Runs in single process. Loads registered encodings for the owner (username_for_attendance)
+    and performs face detection/recognition using our custom KNN/predict function.
     all_req_queues: dict camera_name -> Queue
     all_res_queues: dict camera_name -> Queue
     shared_stop: Manager().dict() with {'stop': False}
     username_for_attendance: the username to log attendance/search results for
     mode_shared: Manager().dict with {'mode': 'attendance' or 'search', 'search_user': None}
     """
-    # Load model once
-    if not os.path.exists(model_path):
-        print("[recognizer] No model found; exiting recognizer.")
-        return
-
-    knn = joblib.load(model_path)
-    print("[recognizer] Model loaded in recognizer process.")
+    # load known encodings for this owner once at start
+    known_encodings, known_labels = get_all_registered_for_owner(username_for_attendance)
+    print(f"[recognizer] Loaded {len(known_labels)} registered encodings for owner {username_for_attendance}")
 
     while not shared_stop['stop']:
         # iterate over request queues
@@ -326,31 +377,51 @@ def recognizer_process(all_req_queues, all_res_queues, shared_stop, username_for
                     for (x, y, w, h) in faces:
                         # crop face and run identification on the face patch
                         face_img = img[y:y+h, x:x+w]
-                        label = identify_face(face_img, knn)
+                        label = None
+                        try:
+                            # generate encoding for face_img (convert color order)
+                            if len(face_img.shape) == 3 and face_img.shape[2] == 3:
+                                rgb_face = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
+                            else:
+                                rgb_face = face_img
+                            # face_recognition expects full image; use face_encodings directly
+                            # resize to consistent size to mimic earlier behavior (we used fx=0.5 earlier)
+                            small_face = cv2.resize(rgb_face, (0, 0), fx=0.5, fy=0.5)
+                            face_locations = face_recognition.face_locations(small_face, model='hog')
+                            encs = face_recognition.face_encodings(small_face, known_face_locations=face_locations)
+                            if encs and len(encs) > 0:
+                                enc = encs[0]
+                                # Predict using custom KNN
+                                label = predict_knn_custom(enc, known_encodings, known_labels, k=K_NEIGHBORS, metric=METRIC)
+                        except Exception as e:
+                            print(f"[recognizer] error identifying face: {e}")
+                            label = None
+
                         detections.append((x, y, w, h, label))
 
                         # handle logging for attendance/search
                         if mode_shared['mode'] == 'attendance':
                             if label:
+                                # label is person_label like "Name_123"
+                                # we can split to name and id
+                                person_name = label.split('_')[0] if '_' in label else label
+                                person_id = label.split('_', 1)[1] if '_' in label else ''
+                                # keep CSV file and DB logging both (maintain existing CSV behavior)
                                 add_attendance(label, cam_key, username=username_for_attendance)
+                                # also log in DB attendance table
+                                log_attendance_db(username_for_attendance, label, person_name, person_id, cam_key)
                         elif mode_shared['mode'] == 'search':
                             search_target = mode_shared.get('search_user')
                             if label == search_target:
                                 search_log = user_searchlog_path(username_for_attendance)
-
-                                # ensure file exists and has header if empty
-                                if not os.path.exists(search_log):
-                                    with open(search_log, 'w') as f:
-                                        f.write("Name,Time,Status,Camera\n")
-
                                 # always append a new search entry even if user already exists
                                 with open(search_log, 'a') as f:
                                     f.write(f"{search_target},{datetime.now().strftime('%H:%M:%S')},Found,{cam_key}\n")
-
+                                # DB log
+                                log_search_db(username_for_attendance, search_target, "Found", cam_key)
                                 print(f"[recognizer] ✅ {search_target} found in {cam_key}")
                                 shared_stop['stop'] = True
                                 break
-
 
                 # return detections to camera-specific response queue
                 res_q = all_res_queues.get(cam_key)
@@ -419,9 +490,13 @@ def home():
         names, rolls, times, cameras, l = extract_attendance(user)
     except Exception:
         csv = user_today_csv(user)
-        df = pd.read_csv(csv)
-        names, rolls, times = df['Name'], df['Roll'], df['Time']
-        cameras, l = df.get('Camera', ['N/A'] * len(df)), len(df)
+        df = pd.read_csv(csv) if os.path.exists(csv) else None
+        if df is not None:
+            names, rolls, times = df['Name'], df['Roll'], df['Time']
+            cameras, l = df.get('Camera', ['N/A'] * len(df)), len(df)
+        else:
+            names = rolls = times = cameras = []
+            l = 0
 
     userlist, _, _, _ = getallusers_original()
     return render_template('home.html', names=names, rolls=rolls, times=times,
@@ -432,12 +507,15 @@ def home():
 @login_required
 def start():
     # spawn one recognizer + camera processes in attendance mode
-    if not os.path.exists(model_path):
+    # Instead of checking for model_path, check if registered encodings exist for user
+    owner = session['user']
+    known_encodings, known_labels = get_all_registered_for_owner(owner)
+    if known_encodings.size == 0:
         names, rolls, times, cameras, l = extract_attendance(session['user'])
         return render_template('home.html', names=names, rolls=rolls, times=times,
                               cameras=cameras, l=l, totalreg=totalreg(),
                               datetoday2=datetoday2,
-                              mess='No trained model found. Please add a new face first.')
+                              mess='No registered faces found. Please add a new face first.')
 
     manager = Manager()
     shared_stop = manager.dict()
@@ -488,10 +566,12 @@ def start():
 @login_required
 def add():
     if request.method == 'POST':
-        newusername = request.form['newusername']
-        newuserid = request.form['newuserid']
-        userimagefolder = f'static/faces/{newusername}_{newuserid}'
-        os.makedirs(userimagefolder, exist_ok=True)
+        newusername = request.form['newusername']  # person's name
+        newuserid = request.form['newuserid']      # person's roll/id
+
+        # folder for saving images (keep same file-structure to stay compatible)
+        person_folder = f'{USER_BASEPATH}/{newusername}_{newuserid}'
+        os.makedirs(person_folder, exist_ok=True)
 
         cap = open_camera(0)
         if cap is None:
@@ -502,6 +582,7 @@ def add():
                                   mess='❌ Cannot access laptop camera for registration!')
 
         i, j = 0, 0
+        saved_files = []
         while i < nimgs:
             ret, frame = cap.read()
             if not ret:
@@ -515,7 +596,9 @@ def add():
 
                 if j % 5 == 0:
                     name = f'{newusername}_{i}.jpg'
-                    cv2.imwrite(f'{userimagefolder}/{name}', frame[y:y + h, x:x + w])
+                    file_path = os.path.join(person_folder, name)
+                    cv2.imwrite(file_path, frame[y:y + h, x:x + w])
+                    saved_files.append(file_path)
                     i += 1
                 j += 1
 
@@ -526,8 +609,20 @@ def add():
         cap.release()
         cv2.destroyAllWindows()
 
-        print('Training model...')
-        train_model()
+        # New behaviour: compute encodings from saved files and store in DB per owner user
+        owner = session['user']
+        person_label = f"{newusername}_{newuserid}"
+        for fp in saved_files:
+            try:
+                img = face_recognition.load_image_file(fp)
+                small_img = cv2.resize(img, (0, 0), fx=0.5, fy=0.5)
+                encs = face_recognition.face_encodings(small_img, model='hog')
+                if encs and len(encs) > 0:
+                    enc = encs[0]
+                    save_encoding_to_db(owner, person_label, newusername, newuserid, enc)
+            except Exception as e:
+                print(f"[add] error processing saved file {fp}: {e}")
+                continue
 
         names, rolls, times, cameras, l = extract_attendance(session['user'])
         return render_template('home.html', names=names, rolls=rolls, times=times,
@@ -542,8 +637,11 @@ def add():
 def search_user():
     searchuser = request.form['searchuser']
 
-    if not os.path.exists(model_path):
-        return render_template('home.html', mess="No trained model found.")
+    # check if there are registered faces for this owner
+    owner = session['user']
+    known_encodings, known_labels = get_all_registered_for_owner(owner)
+    if known_encodings.size == 0:
+        return render_template('home.html', mess="No registered faces for your account.")
 
     manager = Manager()
     shared_stop = manager.dict()
@@ -569,7 +667,6 @@ def search_user():
     recognizer = Process(target=recognizer_process, args=(all_req_queues, all_res_queues, shared_stop, session['user'], mode_shared))
     recognizer.start()
 
-    import time
     start_time = time.time()
     timeout = 300  # 5 minutes
 
@@ -596,7 +693,7 @@ def search_user():
     cv2.destroyAllWindows()
 
     found = False
-    # check search log for any 'Found' entries for today
+    # check search log for any 'Found' entries for today (file)
     log_path = user_searchlog_path(session['user'])
     if os.path.exists(log_path):
         with open(log_path, 'r') as f:
@@ -643,6 +740,45 @@ def download_searchlog():
     file_path = user_searchlog_path(username)
     return send_file(file_path, as_attachment=True)
 
+# ------------------------- ATTENDANCE CSV helpers (kept) -------------------------
+import pandas as pd  # used by extract_attendance / add_attendance existing logic
+
+def extract_attendance(username=None):
+    csv_path = user_today_csv(username)
+    df = pd.read_csv(csv_path)
+    return df['Name'], df['Roll'], df['Time'], df.get('Camera', ['N/A'] * len(df)), len(df)
+
+def add_attendance(name, camera_name, username=None):
+    if username is None:
+        username = session.get('user')
+    username_from_label = name.split('_')[0] if '_' in name else name
+    userid = name.split('_')[1] if '_' in name else name
+    current_time = datetime.now().strftime("%H:%M:%S")
+
+    csv_path = user_today_csv(username)
+    df = pd.read_csv(csv_path)
+    try:
+        if int(userid) not in list(df['Roll'].astype(int)):
+            with open(csv_path, 'a') as f:
+                f.write(f'\n{username_from_label},{userid},{current_time},{camera_name}')
+    except Exception:
+        if userid not in list(df['Roll'].astype(str)):
+            with open(csv_path, 'a') as f:
+                f.write(f'\n{username_from_label},{userid},{current_time},{camera_name}')
+
+def getallusers_original():
+    userlist = os.listdir(USER_BASEPATH) if os.path.exists(USER_BASEPATH) else []
+    names = []
+    rolls = []
+    for i in userlist:
+        if '_' in i:
+            name, roll = i.split('_', 1)
+        else:
+            name, roll = i, ''
+        names.append(name)
+        rolls.append(roll)
+    return userlist, names, rolls, len(userlist)
+
 # ------------------------- MAIN -------------------------
 if __name__ == '__main__':
     # necessary on Windows to avoid fork issues
@@ -653,5 +789,5 @@ if __name__ == '__main__':
 
     os.makedirs('Attendance', exist_ok=True)
     os.makedirs(USER_BASEPATH, exist_ok=True)
-    train_model()
+    # removed train_model() as encodings are created and stored at registration
     app.run(debug=True)
