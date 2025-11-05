@@ -15,13 +15,18 @@ from functools import wraps
 import multiprocessing
 from multiprocessing import Process, Queue, Manager
 
+
+
+
+
+
 app = Flask(__name__)
 app.secret_key = 'replace_this_with_a_strong_secret'  # <-- change this
 
 # ------------------------- CONFIG & GLOBALS -------------------------
 CAMERAS = {
     0: "Bijesh's PC Camera",
-    "http://192.168.1.97:4747/video": "Phone Camera"  # Change IP to your phone's IP
+    "http://10.5.11.92:4747/video/mjpegfeed?640x480": "Phone Camera"  # Change IP to your phone's IP
 }
 
 nimgs = 10
