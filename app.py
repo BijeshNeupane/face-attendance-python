@@ -13,13 +13,13 @@ from queue import Queue
 app = Flask(__name__)
 
 # CAMERA CONFIGURATION
-# For IP Webcam/DroidCam: Use format "http://IP:PORT/video"
+# For IP Webcam/DroidCam: we will use format "http://IP:PORT/video"
 CAMERAS = {
     0: "Bijesh's PC Camera",
-    "http://192.168.1.97:4747/video": "Phone Camera"  # Change IP to your phone's IP
+    "http://192.168.1.97:4747/video/mjpegfeed?640x480": "Phone Camera"  # Change IP to your phone's IP
 }
 
-# For DroidCam, you might need: "http://IP:4747/mjpegfeed?640x480"
+# For DroidCam, we will use: "http://IP:4747/mjpegfeed?640x480"
 # For IP Webcam: "http://IP:8080/video"
 
 nimgs = 10
