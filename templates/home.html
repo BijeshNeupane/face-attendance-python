@@ -239,6 +239,7 @@
             ><b>Select User*</b></label
           ><br />
           <select
+            id="defaultOp"
             name="searchuser"
             style="
               font-size: 20px;
@@ -250,6 +251,7 @@
             "
             required
           >
+            <option value="0">--Select User--</option>
             {% for user in userlist %}
             <option value="{{ user }}">{{ user }}</option>
             {% endfor %}</select
@@ -264,11 +266,30 @@
             "
             type="submit"
             class="btn btn-info"
+            id="searchBtn"
           >
             Search User
           </button>
         </form>
       </div>
     </div>
+
+    <script>
+      const defaultOp = document.getElementById("defaultOp");
+      const btn = document.getElementById("searchBtn");
+      function myFunction() {
+        if (defaultOp.value == "0") {
+          btn.disabled = true;
+        } else {
+          btn.disabled = false;
+        }
+      }
+
+      document.querySelector("select").addEventListener("change", myFunction);
+
+      if (defaultOp.value == "0") {
+        btn.disabled = true;
+      }
+    </script>
   </body>
 </html>

@@ -19,9 +19,8 @@ app = Flask(__name__)
 app.secret_key = 'replace_this_with_a_strong_secret'  # <-- change this
 
 CAMERAS = {
-    0: "PC Camera",
-    "http://10.5.11.92:4747/video/mjpegfeed?640x480": "Phun1",  
-    "http://10.5.14.52:4747/video/mjpegfeed?640x480": "Phun2", 
+    0: "Bijesh's PC Camera",
+    "http://10.5.11.92:4747/video/mjpegfeed?640x480": "Phone Camera"  # Change IP to your phone's IP
 }
 
 nimgs = 10
@@ -411,107 +410,6 @@ def recognizer_process(all_req_queues, all_res_queues, shared_stop, username_for
                                 add_attendance(label, cam_key, username=username_for_attendance)
                                 # also log in DB attendance table
                                 log_attendance_db(username_for_attendance, label, person_name, person_id, cam_key)
-                        
-                        elif mode_shared['mode'] == 'search':
-                            search_target = mode_shared.get('search_user')
-                            if label == search_target:
-                                # Log to file
-                                search_log = user_searchlog_path(username_for_attendance)
-                                with open(search_log, 'a') as f:
-                                    f.write(f"{search_target},{datetime.now().strftime('%H:%M:%S')},Found,{cam_key}\n")
-                                
-                                # Log to database
-                                log_search_db(username_for_attendance, search_target, "Found", cam_key)
-                                
-                                # Print confirmation
-                                print(f"[recognizer] ✅ {search_target} found in {cam_key}")
-                                
-                                # CRITICAL: Set flags BEFORE stopping
-                                shared_stop['found_user'] = search_target
-                                shared_stop['found_camera'] = cam_key
-                                
-                                # Small delay to ensure flags are written to shared memory
-                                time.sleep(0.2)
-                                
-                                # Now signal to stop
-                                shared_stop['stop'] = True
-                                break
-
-                # return detections to camera-specific response queue
-                res_q = all_res_queues.get(cam_key)
-                if res_q:
-                    res_q.put(detections)
-            except Exception as e:
-                print(f"[recognizer] error processing frame from {cam_key}: {e}")
-
-    print("[recognizer] stopping recognizer process")
-    """
-    Runs in single process. Loads registered encodings for the owner (username_for_attendance)
-    and performs face detection/recognition using our custom KNN/predict function.
-    all_req_queues: dict camera_name -> Queue
-    all_res_queues: dict camera_name -> Queue
-    shared_stop: Manager().dict() with {'stop': False}
-    username_for_attendance: the username to log attendance/search results for
-    mode_shared: Manager().dict with {'mode': 'attendance' or 'search', 'search_user': None}
-    """
-    # load known encodings for this owner once at start
-    known_encodings, known_labels = get_all_registered_for_owner(username_for_attendance)
-    print(f"[recognizer] Loaded {len(known_labels)} registered encodings for owner {username_for_attendance}")
-
-    while not shared_stop['stop']:
-        # iterate over request queues
-        for cam_key, q in list(all_req_queues.items()):
-            try:
-                frame_bytes = q.get_nowait()
-            except Exception:
-                continue
-            try:
-                # decode bytes -> numpy image
-                nparr = np.frombuffer(frame_bytes, np.uint8)
-                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                if img is None:
-                    continue
-
-                # do face detection with Haar first (faster)
-                faces = extract_faces(img)
-                detections = []
-                if len(faces) > 0:
-                    for (x, y, w, h) in faces:
-                        # crop face and run identification on the face patch
-                        face_img = img[y:y+h, x:x+w]
-                        label = None
-                        try:
-                            # generate encoding for face_img (convert color order)
-                            if len(face_img.shape) == 3 and face_img.shape[2] == 3:
-                                rgb_face = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
-                            else:
-                                rgb_face = face_img
-                            # face_recognition expects full image; use face_encodings directly
-                            # resize to consistent size to mimic earlier behavior (we used fx=0.5 earlier)
-                            small_face = cv2.resize(rgb_face, (0, 0), fx=0.5, fy=0.5)
-                            face_locations = face_recognition.face_locations(small_face, model='hog')
-                            encs = face_recognition.face_encodings(small_face, known_face_locations=face_locations)
-                            if encs and len(encs) > 0:
-                                enc = encs[0]
-                                # Predict using custom KNN
-                                label = predict_knn_custom(enc, known_encodings, known_labels, k=K_NEIGHBORS, metric=METRIC)
-                        except Exception as e:
-                            print(f"[recognizer] error identifying face: {e}")
-                            label = None
-
-                        detections.append((x, y, w, h, label))
-
-                        # handle logging for attendance/search
-                        if mode_shared['mode'] == 'attendance':
-                            if label:
-                                # label is person_label like "Name_123"
-                                # we can split to name and id
-                                person_name = label.split('_')[0] if '_' in label else label
-                                person_id = label.split('_', 1)[1] if '_' in label else ''
-                                # keep CSV file and DB logging both (maintain existing CSV behavior)
-                                add_attendance(label, cam_key, username=username_for_attendance)
-                                # also log in DB attendance table
-                                log_attendance_db(username_for_attendance, label, person_name, person_id, cam_key)
                         elif mode_shared['mode'] == 'search':
                             search_target = mode_shared.get('search_user')
                             if label == search_target:
@@ -668,9 +566,10 @@ def start():
 @login_required
 def add():
     if request.method == 'POST':
-        newusername = request.form['newusername']
-        newuserid = request.form['newuserid']
+        newusername = request.form['newusername']  # person's name
+        newuserid = request.form['newuserid']      # person's roll/id
 
+        # folder for saving images (keep same file-structure to stay compatible)
         person_folder = f'{USER_BASEPATH}/{newusername}_{newuserid}'
         os.makedirs(person_folder, exist_ok=True)
 
@@ -682,75 +581,37 @@ def add():
                                   datetoday2=datetoday2,
                                   mess='❌ Cannot access laptop camera for registration!')
 
-        i = 0
+        i, j = 0, 0
         saved_files = []
-        print(f"\n{'='*50}")
-        print("REGISTRATION MODE - Instructions:")
-        print("  - Press 'C' to capture a photo")
-        print("  - Press 'ESC' to cancel registration")
-        print(f"  - Need {nimgs} photos total")
-        print(f"{'='*50}\n")
-        
         while i < nimgs:
             ret, frame = cap.read()
             if not ret:
                 break
 
-            display_frame = frame.copy()
             faces = extract_faces(frame)
-            
-            # Draw rectangles around detected faces
             for (x, y, w, h) in faces:
-                cv2.rectangle(display_frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
-            
-            # Display instructions and progress
-            cv2.putText(display_frame, f'Images Captured: {i}/{nimgs}', (30, 30),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
-            cv2.putText(display_frame, "Press 'C' to capture", (30, 60),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
-            cv2.putText(display_frame, "Press 'ESC' to cancel", (30, 85),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 0), 2)
+                cv2.rectangle(frame, (x, y), (x + w, y + h), (0, 255, 0), 2)
+                cv2.putText(frame, f'Images: {i}/{nimgs}', (30, 30),
+                            cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
-            cv2.imshow('Adding New User - Press C to Capture', display_frame)
-            
-            key = cv2.waitKey(1) & 0xFF
-            
-            if key == ord('c') or key == ord('C'):  # Capture photo
-                if len(faces) > 0:
-                    # Save the face
-                    x, y, w, h = faces[0]  # Use first detected face
+                if j % 5 == 0:
                     name = f'{newusername}_{i}.jpg'
                     file_path = os.path.join(person_folder, name)
                     cv2.imwrite(file_path, frame[y:y + h, x:x + w])
                     saved_files.append(file_path)
                     i += 1
-                    print(f"✓ Photo {i}/{nimgs} captured")
-                else:
-                    print("⚠ No face detected! Please position your face in frame.")
-                    cv2.putText(display_frame, "No face detected!", (30, 110),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                    cv2.imshow('Adding New User - Press C to Capture', display_frame)
-                    cv2.waitKey(1000)  # Show message for 1 second
-            
-            elif key == 27:  # ESC to cancel
-                print("Registration cancelled by user")
+                j += 1
+
+            cv2.imshow('Adding New User - Laptop Camera', frame)
+            if cv2.waitKey(1) == 27:  # ESC to cancel
                 break
 
         cap.release()
         cv2.destroyAllWindows()
 
-        if len(saved_files) < nimgs:
-            names, rolls, times, cameras, l = extract_attendance(session['user'])
-            return render_template('home.html', names=names, rolls=rolls, times=times,
-                                  cameras=cameras, l=l, totalreg=totalreg(),
-                                  datetoday2=datetoday2,
-                                  mess=f'⚠ Registration incomplete. Only {len(saved_files)}/{nimgs} photos captured.')
-
-        # Process encodings
+        # New behaviour: compute encodings from saved files and store in DB per owner user
         owner = session['user']
         person_label = f"{newusername}_{newuserid}"
-        encodings_saved = 0
-        
         for fp in saved_files:
             try:
                 img = face_recognition.load_image_file(fp)
@@ -759,7 +620,6 @@ def add():
                 if encs and len(encs) > 0:
                     enc = encs[0]
                     save_encoding_to_db(owner, person_label, newusername, newuserid, enc)
-                    encodings_saved += 1
             except Exception as e:
                 print(f"[add] error processing saved file {fp}: {e}")
                 continue
@@ -768,40 +628,28 @@ def add():
         return render_template('home.html', names=names, rolls=rolls, times=times,
                               cameras=cameras, l=l, totalreg=totalreg(),
                               datetoday2=datetoday2,
-                              mess=f'✅ User {newusername} registered successfully! ({encodings_saved} encodings saved)')
+                              mess=f'✅ User {newusername} registered successfully!')
 
     return redirect(url_for('home'))
-
-
 
 @app.route('/search', methods=['POST'])
 @login_required
 def search_user():
     searchuser = request.form['searchuser']
 
-    # Check if there are registered faces for this owner
+    # check if there are registered faces for this owner
     owner = session['user']
     known_encodings, known_labels = get_all_registered_for_owner(owner)
     if known_encodings.size == 0:
-        names, rolls, times, cameras, l = extract_attendance(session['user'])
-        userlist, _, _, _ = getallusers_original()
-        return render_template('home.html', names=names, rolls=rolls, times=times,
-                              cameras=cameras, l=l, totalreg=totalreg(),
-                              datetoday2=datetoday2, userlist=userlist,
-                              mess="No registered faces for your account.")
+        return render_template('home.html', mess="No registered faces for your account.")
 
-    # Initialize multiprocessing manager and shared flags
     manager = Manager()
     shared_stop = manager.dict()
     shared_stop['stop'] = False
-    shared_stop['found_user'] = None     # Track which user was found
-    shared_stop['found_camera'] = None   # Track which camera found them
-    
     mode_shared = manager.dict()
     mode_shared['mode'] = 'search'
     mode_shared['search_user'] = searchuser
 
-    # Prepare queues and processes for each camera
     all_req_queues = {}
     all_res_queues = {}
     cam_processes = []
@@ -816,13 +664,9 @@ def search_user():
         p.start()
         cam_processes.append(p)
 
-    # Start recognizer process
-    recognizer = Process(target=recognizer_process, 
-                        args=(all_req_queues, all_res_queues, shared_stop, 
-                              session['user'], mode_shared))
+    recognizer = Process(target=recognizer_process, args=(all_req_queues, all_res_queues, shared_stop, session['user'], mode_shared))
     recognizer.start()
 
-    # Wait for search to complete or timeout
     start_time = time.time()
     timeout = 300  # 5 minutes
 
@@ -832,53 +676,38 @@ def search_user():
             break
         time.sleep(0.1)
 
-    # Give a moment for the found_user flag to be set before stopping everything
-    if shared_stop['stop']:
-        time.sleep(0.3)
-    
-    # Stop all processes
     shared_stop['stop'] = True
-    time.sleep(0.2)
+    time.sleep(0.5)
 
-    # Cleanup camera processes
     for p in cam_processes:
         try:
             p.terminate()
-            p.join(timeout=1)
-        except Exception as e:
-            print(f"Error terminating camera process: {e}")
+        except Exception:
+            pass
 
-    # Cleanup recognizer process
     try:
         recognizer.terminate()
-        recognizer.join(timeout=1)
-    except Exception as e:
-        print(f"Error terminating recognizer process: {e}")
+    except Exception:
+        pass
 
-    # Close all OpenCV windows
     cv2.destroyAllWindows()
 
-    # Check if user was actually found using shared_stop flags
-    found_user = shared_stop.get('found_user')
-    found_camera = shared_stop.get('found_camera')
-    
-    # Get current attendance data
+    found = False
+    # check search log for any 'Found' entries for today (file)
+    log_path = user_searchlog_path(session['user'])
+    if os.path.exists(log_path):
+        with open(log_path, 'r') as f:
+            content = f.read()
+            if 'Found' in content:
+                found = True
+
     names, rolls, times, cameras, l = extract_attendance(session['user'])
     userlist, _, _, _ = getallusers_original()
-
-    # Generate appropriate message based on search results
-    if found_user and found_camera:
-        mess = f"✅ User Found: {searchuser} in {found_camera}"
-    elif found_user:
-        mess = f"✅ User Found: {searchuser}"
-    else:
-        mess = f"❌ User '{searchuser}' Not Found in any camera feed"
 
     return render_template('home.html', names=names, rolls=rolls, times=times,
                            cameras=cameras, l=l, totalreg=totalreg(),
                            datetoday2=datetoday2, userlist=userlist,
-                           mess=mess)
-
+                           mess=f"{'✅ User Found!' if found else '❌ User Not Found!'}")
 
 @app.route('/test-cameras', methods=['GET'])
 @login_required
