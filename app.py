@@ -20,8 +20,9 @@ app.secret_key = 'replace_this_with_a_strong_secret'  # <-- change this
 
 CAMERAS = {
     0: "PC Camera",
-    "http://10.5.11.92:4747/video/mjpegfeed?640x480": "Phun1",  
-    "http://10.5.14.52:4747/video/mjpegfeed?640x480": "Phun2", 
+    "http://192.168.1.97:4747/video/mjpegfeed?640x480": "Phun Bijesh",  
+    # "http://10.5.14.52:4747/video/mjpegfeed?640x480": "Phun Manjil", 
+    # "http://10.5.21.107:4747/video/mjpegfeed?640x480": "Phun Rachana", 
 }
 
 nimgs = 10
@@ -777,6 +778,7 @@ def add():
 @app.route('/search', methods=['POST'])
 @login_required
 def search_user():
+    user = session['user']
     searchuser = request.form['searchuser']
 
     # Check if there are registered faces for this owner
@@ -787,8 +789,8 @@ def search_user():
         userlist, _, _, _ = getallusers_original()
         return render_template('home.html', names=names, rolls=rolls, times=times,
                               cameras=cameras, l=l, totalreg=totalreg(),
-                              datetoday2=datetoday2, userlist=userlist,
-                              mess="No registered faces for your account.")
+                              datetoday2=datetoday2, userlist=userlist,username=user,
+                              mess="No registered faces for your account.", color_class='text-danger')
 
     # Initialize multiprocessing manager and shared flags
     manager = Manager()
@@ -869,15 +871,18 @@ def search_user():
     # Generate appropriate message based on search results
     if found_user and found_camera:
         mess = f"✅ User Found: {searchuser} in {found_camera}"
+        color_class = "text-success"
     elif found_user:
         mess = f"✅ User Found: {searchuser}"
+        color_class = "text-success"
     else:
         mess = f"❌ User '{searchuser}' Not Found in any camera feed"
+        color_class = "text-danger"
 
     return render_template('home.html', names=names, rolls=rolls, times=times,
                            cameras=cameras, l=l, totalreg=totalreg(),
                            datetoday2=datetoday2, userlist=userlist,
-                           mess=mess)
+                           mess=mess, color_class=color_class)
 
 
 @app.route('/test-cameras', methods=['GET'])
