@@ -14,15 +14,14 @@ import multiprocessing
 from multiprocessing import Process, Queue, Manager
 import time
 
-# ------------------------- CONFIG & GLOBALS -------------------------
 app = Flask(__name__)
-app.secret_key = 'replace_this_with_a_strong_secret'  # <-- change this
+app.secret_key = 'Super_Secret_Key'  
 
 CAMERAS = {
     0: "PC Camera",
-    "http://192.168.1.97:4747/video/mjpegfeed?640x480": "Phun Bijesh",  
+    # "http://10.5.10.195:4747/video/mjpegfeed?640x480": "Phun Bijesh",  
     # "http://10.5.14.52:4747/video/mjpegfeed?640x480": "Phun Manjil", 
-    # "http://10.5.21.107:4747/video/mjpegfeed?640x480": "Phun Rachana", 
+    "http://10.5.10.169:4747/video/mjpegfeed?640x480": "Rachana phone", 
 }
 
 nimgs = 10
@@ -34,23 +33,19 @@ face_detector = cv2.CascadeClassifier('haarcascade_frontalface_default.xml')
 for directory in ['Attendance', 'static', 'static/faces', 'static/found', 'uploads']:
     os.makedirs(directory, exist_ok=True)
 
-# removed model_path / joblib / sklearn usage
-USER_DB = 'users.db'         # original users DB
-ENC_DB = 'encodings.db'      # new DB for registered faces and attendance (we'll store users here too)
+
+USER_DB = 'users.db'        
+ENC_DB = 'encodings.db'      
 USER_BASEPATH = 'static/faces'
 
 # ------------------------- SETTINGS FOR CUSTOM KNN -------------------------
 K_NEIGHBORS = 3
 METRIC = "cosine"  # "euclidean" or "cosine"
 THRESHOLD_EUCLIDEAN = 0.5
-THRESHOLD_COSINE = 0.95  # interpreted as minimum cosine similarity
+THRESHOLD_COSINE = 0.95  # minimum cosine similarity
 
 # ------------------------- DATABASE SETUP -------------------------
 def init_db():
-    # create users db (kept) and encoding db (new combined)
-    # We'll keep the original USER_DB for auth compatibility, but we can also create tables in the same DB
-    # To avoid confusion, we'll create/ensure both USER_DB and ENC_DB exist and necessary tables are in ENC_DB.
-    # Keep original users table in USER_DB as your app currently expects.
     con = sqlite3.connect(USER_DB)
     cur = con.cursor()
     cur.execute('''CREATE TABLE IF NOT EXISTS users (
@@ -64,7 +59,6 @@ def init_db():
 
     con2 = sqlite3.connect(ENC_DB)
     cur2 = con2.cursor()
-    # registered faces: owner_username ties to the logged-in user that registered these faces
     cur2.execute('''CREATE TABLE IF NOT EXISTS registered_faces (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         owner_username TEXT,
@@ -74,7 +68,6 @@ def init_db():
                         encoding TEXT,       -- JSON string of 128d list
                         created_at TEXT
                     )''')
-    # attendance logs per owner (i.e., logged-in user)
     cur2.execute('''CREATE TABLE IF NOT EXISTS attendance_logs (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         owner_username TEXT,
@@ -84,7 +77,6 @@ def init_db():
                         time TEXT,
                         camera TEXT
                     )''')
-    # search logs (per owner)
     cur2.execute('''CREATE TABLE IF NOT EXISTS search_logs (
                         id INTEGER PRIMARY KEY AUTOINCREMENT,
                         owner_username TEXT,
@@ -216,15 +208,11 @@ def log_search_db(owner_username, search_target, status, camera_name):
 
 # ------------------------- CUSTOM KNN & METRICS -------------------------
 def euclidean_distances(face_encoding, known_encodings):
-    # face_encoding: (128,), known_encodings: (N,128)
-    # returns distances shape (N,)
     diffs = known_encodings - face_encoding
     dists = np.linalg.norm(diffs, axis=1)
     return dists
 
 def cosine_similarities(face_encoding, known_encodings):
-    # returns cosine similarity in [-1,1] shape (N,)
-    # handle zero vectors defensively
     fe = face_encoding / np.linalg.norm(face_encoding) if np.linalg.norm(face_encoding) != 0 else face_encoding
     ke_norms = np.linalg.norm(known_encodings, axis=1)
     # avoid division by zero
@@ -248,16 +236,13 @@ def predict_knn_custom(face_encoding, known_encodings, known_labels, k=K_NEIGHBO
         dists = euclidean_distances(face_encoding, known_encodings)
         idx_sorted = np.argsort(dists)
         kidx = idx_sorted[:min(k, len(dists))]
-        # threshold check: if best distance > threshold => unknown
         if dists[kidx[0]] > THRESHOLD_EUCLIDEAN:
             return None
         k_labels = [known_labels[i] for i in kidx]
-        # majority vote
         pred = max(set(k_labels), key=k_labels.count)
         return pred
     elif metric == "cosine":
         sims = cosine_similarities(face_encoding, known_encodings)
-        # higher is better
         idx_sorted = np.argsort(-sims)
         kidx = idx_sorted[:min(k, len(sims))]
         if sims[kidx[0]] < THRESHOLD_COSINE:
@@ -266,7 +251,8 @@ def predict_knn_custom(face_encoding, known_encodings, known_labels, k=K_NEIGHBO
         pred = max(set(k_labels), key=k_labels.count)
         return pred
     else:
-        # fallback to euclidean
+        # if nothung is given then euclidean is selected
+
         return predict_knn_custom(face_encoding, known_encodings, known_labels, k, "euclidean")
 
 # --------------------- Multiprocessing-based camera + recognizer ---------------------
@@ -279,6 +265,8 @@ def camera_process(camera_id, camera_name, req_queue, res_queue, stop_flag, proc
     - receives detection results from res_queue and overlays them on display_frame,
     - shows window and allows 'q' to quit (sets stop_flag).
     """
+
+    
     cap = open_camera(camera_id)
     if cap is None:
         print(f"[camera_process] Cannot open camera {camera_name}")
@@ -301,22 +289,18 @@ def camera_process(camera_id, camera_name, req_queue, res_queue, stop_flag, proc
             frame_count += 1
             display_frame = frame.copy()
 
-            # send for recognition every Nth frame
             if frame_count % process_every_n_frames == 0:
                 # encode as JPEG to reduce IPC size
                 success, encoded = cv2.imencode('.jpg', frame)
                 if success:
                     try:
-                        # some multiprocessing Queue implementations have put_bytes
                         req_queue.put_bytes(encoded.tobytes())
                     except Exception:
                         req_queue.put(encoded.tobytes())
 
-            # non-blocking read of results for this camera
             try:
                 while True:
                     result = res_queue.get_nowait()
-                    # result is list of detections: [(x, y, w, h, label), ...] in original frame coordinates
                     for det in result:
                         x, y, w, h, label = det
                         color = (50, 200, 50) if label and not label == "Unknown" else (0, 0, 255)
@@ -324,7 +308,6 @@ def camera_process(camera_id, camera_name, req_queue, res_queue, stop_flag, proc
                         cv2.rectangle(display_frame, (x, y), (x + w, y + h), color, 2)
                         cv2.putText(display_frame, text, (x, y - 10), cv2.FONT_HERSHEY_SIMPLEX, 0.6, color, 2)
             except Exception:
-                # no result available
                 pass
 
             # show camera name
@@ -354,46 +337,38 @@ def recognizer_process(all_req_queues, all_res_queues, shared_stop, username_for
     username_for_attendance: the username to log attendance/search results for
     mode_shared: Manager().dict with {'mode': 'attendance' or 'search', 'search_user': None}
     """
-    # load known encodings for this owner once at start
     known_encodings, known_labels = get_all_registered_for_owner(username_for_attendance)
     print(f"[recognizer] Loaded {len(known_labels)} registered encodings for owner {username_for_attendance}")
 
     while not shared_stop['stop']:
-        # iterate over request queues
         for cam_key, q in list(all_req_queues.items()):
             try:
                 frame_bytes = q.get_nowait()
             except Exception:
                 continue
             try:
-                # decode bytes -> numpy image
                 nparr = np.frombuffer(frame_bytes, np.uint8)
                 img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
                 if img is None:
                     continue
 
-                # do face detection with Haar first (faster)
+                # do face detection with Haarcascade first (faster)
                 faces = extract_faces(img)
                 detections = []
                 if len(faces) > 0:
                     for (x, y, w, h) in faces:
-                        # crop face and run identification on the face patch
                         face_img = img[y:y+h, x:x+w]
                         label = None
                         try:
-                            # generate encoding for face_img (convert color order)
                             if len(face_img.shape) == 3 and face_img.shape[2] == 3:
                                 rgb_face = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
                             else:
                                 rgb_face = face_img
-                            # face_recognition expects full image; use face_encodings directly
-                            # resize to consistent size to mimic earlier behavior (we used fx=0.5 earlier)
                             small_face = cv2.resize(rgb_face, (0, 0), fx=0.5, fy=0.5)
                             face_locations = face_recognition.face_locations(small_face, model='hog')
                             encs = face_recognition.face_encodings(small_face, known_face_locations=face_locations)
                             if encs and len(encs) > 0:
                                 enc = encs[0]
-                                # Predict using custom KNN
                                 label = predict_knn_custom(enc, known_encodings, known_labels, k=K_NEIGHBORS, metric=METRIC)
                         except Exception as e:
                             print(f"[recognizer] error identifying face: {e}")
@@ -401,16 +376,12 @@ def recognizer_process(all_req_queues, all_res_queues, shared_stop, username_for
 
                         detections.append((x, y, w, h, label))
 
-                        # handle logging for attendance/search
+                      
                         if mode_shared['mode'] == 'attendance':
                             if label:
-                                # label is person_label like "Name_123"
-                                # we can split to name and id
                                 person_name = label.split('_')[0] if '_' in label else label
                                 person_id = label.split('_', 1)[1] if '_' in label else ''
-                                # keep CSV file and DB logging both (maintain existing CSV behavior)
                                 add_attendance(label, cam_key, username=username_for_attendance)
-                                # also log in DB attendance table
                                 log_attendance_db(username_for_attendance, label, person_name, person_id, cam_key)
                         
                         elif mode_shared['mode'] == 'search':
@@ -424,21 +395,16 @@ def recognizer_process(all_req_queues, all_res_queues, shared_stop, username_for
                                 # Log to database
                                 log_search_db(username_for_attendance, search_target, "Found", cam_key)
                                 
-                                # Print confirmation
                                 print(f"[recognizer] ✅ {search_target} found in {cam_key}")
                                 
-                                # CRITICAL: Set flags BEFORE stopping
                                 shared_stop['found_user'] = search_target
                                 shared_stop['found_camera'] = cam_key
                                 
-                                # Small delay to ensure flags are written to shared memory
                                 time.sleep(0.2)
                                 
-                                # Now signal to stop
                                 shared_stop['stop'] = True
                                 break
 
-                # return detections to camera-specific response queue
                 res_q = all_res_queues.get(cam_key)
                 if res_q:
                     res_q.put(detections)
@@ -446,94 +412,80 @@ def recognizer_process(all_req_queues, all_res_queues, shared_stop, username_for
                 print(f"[recognizer] error processing frame from {cam_key}: {e}")
 
     print("[recognizer] stopping recognizer process")
-    """
-    Runs in single process. Loads registered encodings for the owner (username_for_attendance)
-    and performs face detection/recognition using our custom KNN/predict function.
-    all_req_queues: dict camera_name -> Queue
-    all_res_queues: dict camera_name -> Queue
-    shared_stop: Manager().dict() with {'stop': False}
-    username_for_attendance: the username to log attendance/search results for
-    mode_shared: Manager().dict with {'mode': 'attendance' or 'search', 'search_user': None}
-    """
-    # load known encodings for this owner once at start
-    known_encodings, known_labels = get_all_registered_for_owner(username_for_attendance)
-    print(f"[recognizer] Loaded {len(known_labels)} registered encodings for owner {username_for_attendance}")
+    # """
+    # Runs in single process. Loads registered encodings for the owner (username_for_attendance)
+    # and performs face detection/recognition using our custom KNN/predict function.
+    # all_req_queues: dict camera_name -> Queue
+    # all_res_queues: dict camera_name -> Queue
+    # shared_stop: Manager().dict() with {'stop': False}
+    # username_for_attendance: the username to log attendance/search results for
+    # mode_shared: Manager().dict with {'mode': 'attendance' or 'search', 'search_user': None}
+    # """
+    # known_encodings, known_labels = get_all_registered_for_owner(username_for_attendance)
+    # print(f"[recognizer] Loaded {len(known_labels)} registered encodings for owner {username_for_attendance}")
 
-    while not shared_stop['stop']:
-        # iterate over request queues
-        for cam_key, q in list(all_req_queues.items()):
-            try:
-                frame_bytes = q.get_nowait()
-            except Exception:
-                continue
-            try:
-                # decode bytes -> numpy image
-                nparr = np.frombuffer(frame_bytes, np.uint8)
-                img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
-                if img is None:
-                    continue
+    # while not shared_stop['stop']:
+    #     for cam_key, q in list(all_req_queues.items()):
+    #         try:
+    #             frame_bytes = q.get_nowait()
+    #         except Exception:
+    #             continue
+    #         try:
+    #             nparr = np.frombuffer(frame_bytes, np.uint8)
+    #             img = cv2.imdecode(nparr, cv2.IMREAD_COLOR)
+    #             if img is None:
+    #                 continue
 
-                # do face detection with Haar first (faster)
-                faces = extract_faces(img)
-                detections = []
-                if len(faces) > 0:
-                    for (x, y, w, h) in faces:
-                        # crop face and run identification on the face patch
-                        face_img = img[y:y+h, x:x+w]
-                        label = None
-                        try:
-                            # generate encoding for face_img (convert color order)
-                            if len(face_img.shape) == 3 and face_img.shape[2] == 3:
-                                rgb_face = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
-                            else:
-                                rgb_face = face_img
-                            # face_recognition expects full image; use face_encodings directly
-                            # resize to consistent size to mimic earlier behavior (we used fx=0.5 earlier)
-                            small_face = cv2.resize(rgb_face, (0, 0), fx=0.5, fy=0.5)
-                            face_locations = face_recognition.face_locations(small_face, model='hog')
-                            encs = face_recognition.face_encodings(small_face, known_face_locations=face_locations)
-                            if encs and len(encs) > 0:
-                                enc = encs[0]
-                                # Predict using custom KNN
-                                label = predict_knn_custom(enc, known_encodings, known_labels, k=K_NEIGHBORS, metric=METRIC)
-                        except Exception as e:
-                            print(f"[recognizer] error identifying face: {e}")
-                            label = None
+    #             # do face detection with Haar cascade first (faster)
+    #             faces = extract_faces(img)
+    #             detections = []
+    #             if len(faces) > 0:
+    #                 for (x, y, w, h) in faces:
+    #                     face_img = img[y:y+h, x:x+w]
+    #                     label = None
+    #                     try:
+    #                         if len(face_img.shape) == 3 and face_img.shape[2] == 3:
+    #                             rgb_face = cv2.cvtColor(face_img, cv2.COLOR_BGR2RGB)
+    #                         else:
+    #                             rgb_face = face_img
+    #                         small_face = cv2.resize(rgb_face, (0, 0), fx=0.5, fy=0.5)
+    #                         face_locations = face_recognition.face_locations(small_face, model='hog')
+    #                         encs = face_recognition.face_encodings(small_face, known_face_locations=face_locations)
+    #                         if encs and len(encs) > 0:
+    #                             enc = encs[0]
+    #                             label = predict_knn_custom(enc, known_encodings, known_labels, k=K_NEIGHBORS, metric=METRIC)
+    #                     except Exception as e:
+    #                         print(f"[recognizer] error identifying face: {e}")
+    #                         label = None
 
-                        detections.append((x, y, w, h, label))
+    #                     detections.append((x, y, w, h, label))
 
-                        # handle logging for attendance/search
-                        if mode_shared['mode'] == 'attendance':
-                            if label:
-                                # label is person_label like "Name_123"
-                                # we can split to name and id
-                                person_name = label.split('_')[0] if '_' in label else label
-                                person_id = label.split('_', 1)[1] if '_' in label else ''
-                                # keep CSV file and DB logging both (maintain existing CSV behavior)
-                                add_attendance(label, cam_key, username=username_for_attendance)
-                                # also log in DB attendance table
-                                log_attendance_db(username_for_attendance, label, person_name, person_id, cam_key)
-                        elif mode_shared['mode'] == 'search':
-                            search_target = mode_shared.get('search_user')
-                            if label == search_target:
-                                search_log = user_searchlog_path(username_for_attendance)
-                                # always append a new search entry even if user already exists
-                                with open(search_log, 'a') as f:
-                                    f.write(f"{search_target},{datetime.now().strftime('%H:%M:%S')},Found,{cam_key}\n")
-                                # DB log
-                                log_search_db(username_for_attendance, search_target, "Found", cam_key)
-                                print(f"[recognizer] ✅ {search_target} found in {cam_key}")
-                                shared_stop['stop'] = True
-                                break
+    #                     if mode_shared['mode'] == 'attendance':
+    #                         if label:
+    #                             person_name = label.split('_')[0] if '_' in label else label
+    #                             person_id = label.split('_', 1)[1] if '_' in label else ''
+    #                             add_attendance(label, cam_key, username=username_for_attendance)
+    #                             log_attendance_db(username_for_attendance, label, person_name, person_id, cam_key)
+    #                     elif mode_shared['mode'] == 'search':
+    #                         search_target = mode_shared.get('search_user')
+    #                         if label == search_target:
+    #                             search_log = user_searchlog_path(username_for_attendance)
+    #                             # always append a new search entry even if user already exists
+    #                             with open(search_log, 'a') as f:
+    #                                 f.write(f"{search_target},{datetime.now().strftime('%H:%M:%S')},Found,{cam_key}\n")
+    #                             # DB log
+    #                             log_search_db(username_for_attendance, search_target, "Found", cam_key)
+    #                             print(f"[recognizer] ✅ {search_target} found in {cam_key}")
+    #                             shared_stop['stop'] = True
+    #                             break
 
-                # return detections to camera-specific response queue
-                res_q = all_res_queues.get(cam_key)
-                if res_q:
-                    res_q.put(detections)
-            except Exception as e:
-                print(f"[recognizer] error processing frame from {cam_key}: {e}")
+    #             res_q = all_res_queues.get(cam_key)
+    #             if res_q:
+    #                 res_q.put(detections)
+    #         except Exception as e:
+    #             print(f"[recognizer] error processing frame from {cam_key}: {e}")
 
-    print("[recognizer] stopping recognizer process")
+    # print("[recognizer] stopping recognizer process")
 
 # ------------------------- FLASK ROUTES (original + auth) -------------------------
 @app.route('/login', methods=['GET', 'POST'])
@@ -609,8 +561,6 @@ def home():
 @app.route('/start', methods=['GET'])
 @login_required
 def start():
-    # spawn one recognizer + camera processes in attendance mode
-    # Instead of checking for model_path, check if registered encodings exist for user
     owner = session['user']
     known_encodings, known_labels = get_all_registered_for_owner(owner)
     if known_encodings.size == 0:
@@ -627,7 +577,6 @@ def start():
     mode_shared['mode'] = 'attendance'
     mode_shared['search_user'] = None
 
-    # prepare queues: one req & res queue per camera (keyed by cam_name)
     all_req_queues = {}
     all_res_queues = {}
     cam_processes = []
@@ -645,14 +594,12 @@ def start():
     recognizer = Process(target=recognizer_process, args=(all_req_queues, all_res_queues, shared_stop, session['user'], mode_shared))
     recognizer.start()
 
-    # wait for all camera processes to finish (they set shared_stop on 'q' or recognizer finds target)
     try:
         for p in cam_processes:
             p.join()
     except KeyboardInterrupt:
         shared_stop['stop'] = True
 
-    # terminate recognizer
     shared_stop['stop'] = True
     recognizer.join(timeout=2)
     try:
@@ -731,7 +678,7 @@ def add():
                     cv2.putText(display_frame, "No face detected!", (30, 110),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
                     cv2.imshow('Adding New User - Press C to Capture', display_frame)
-                    cv2.waitKey(1000)  # Show message for 1 second
+                    cv2.waitKey(1000) 
             
             elif key == 27:  # ESC to cancel
                 print("Registration cancelled by user")
@@ -781,7 +728,6 @@ def search_user():
     user = session['user']
     searchuser = request.form['searchuser']
 
-    # Check if there are registered faces for this owner
     owner = session['user']
     known_encodings, known_labels = get_all_registered_for_owner(owner)
     if known_encodings.size == 0:
@@ -792,18 +738,16 @@ def search_user():
                               datetoday2=datetoday2, userlist=userlist,username=user,
                               mess="No registered faces for your account.", color_class='text-danger')
 
-    # Initialize multiprocessing manager and shared flags
     manager = Manager()
     shared_stop = manager.dict()
     shared_stop['stop'] = False
-    shared_stop['found_user'] = None     # Track which user was found
-    shared_stop['found_camera'] = None   # Track which camera found them
+    shared_stop['found_user'] = None     
+    shared_stop['found_camera'] = None   
     
     mode_shared = manager.dict()
     mode_shared['mode'] = 'search'
     mode_shared['search_user'] = searchuser
 
-    # Prepare queues and processes for each camera
     all_req_queues = {}
     all_res_queues = {}
     cam_processes = []
@@ -818,15 +762,13 @@ def search_user():
         p.start()
         cam_processes.append(p)
 
-    # Start recognizer process
     recognizer = Process(target=recognizer_process, 
                         args=(all_req_queues, all_res_queues, shared_stop, 
                               session['user'], mode_shared))
     recognizer.start()
 
-    # Wait for search to complete or timeout
     start_time = time.time()
-    timeout = 300  # 5 minutes
+    timeout = 20  # 20 seconds
 
     while not shared_stop['stop'] and time.time() - start_time < timeout:
         alive = any(p.is_alive() for p in cam_processes)
@@ -834,15 +776,12 @@ def search_user():
             break
         time.sleep(0.1)
 
-    # Give a moment for the found_user flag to be set before stopping everything
     if shared_stop['stop']:
         time.sleep(0.3)
     
-    # Stop all processes
     shared_stop['stop'] = True
     time.sleep(0.2)
 
-    # Cleanup camera processes
     for p in cam_processes:
         try:
             p.terminate()
@@ -850,25 +789,21 @@ def search_user():
         except Exception as e:
             print(f"Error terminating camera process: {e}")
 
-    # Cleanup recognizer process
     try:
         recognizer.terminate()
         recognizer.join(timeout=1)
     except Exception as e:
         print(f"Error terminating recognizer process: {e}")
 
-    # Close all OpenCV windows
     cv2.destroyAllWindows()
 
-    # Check if user was actually found using shared_stop flags
     found_user = shared_stop.get('found_user')
     found_camera = shared_stop.get('found_camera')
     
-    # Get current attendance data
     names, rolls, times, cameras, l = extract_attendance(session['user'])
     userlist, _, _, _ = getallusers_original()
 
-    # Generate appropriate message based on search results
+    
     if found_user and found_camera:
         mess = f"✅ User Found: {searchuser} in {found_camera}"
         color_class = "text-success"
@@ -917,7 +852,7 @@ def download_searchlog():
     return send_file(file_path, as_attachment=True)
 
 # ------------------------- ATTENDANCE CSV helpers (kept) -------------------------
-import pandas as pd  # used by extract_attendance / add_attendance existing logic
+import pandas as pd  
 
 def extract_attendance(username=None):
     csv_path = user_today_csv(username)
@@ -957,7 +892,6 @@ def getallusers_original():
 
 # ------------------------- MAIN -------------------------
 if __name__ == '__main__':
-    # necessary on Windows to avoid fork issues
     try:
         multiprocessing.set_start_method('spawn')
     except Exception:
@@ -965,5 +899,4 @@ if __name__ == '__main__':
 
     os.makedirs('Attendance', exist_ok=True)
     os.makedirs(USER_BASEPATH, exist_ok=True)
-    # removed train_model() as encodings are created and stored at registration
     app.run(debug=True)

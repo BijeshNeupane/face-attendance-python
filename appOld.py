@@ -145,6 +145,9 @@ def extract_faces(img):
     except Exception:
         return []
 
+.
+
+
 def open_camera(camera_id):
     cap = cv2.VideoCapture(camera_id)
     if not cap.isOpened():
